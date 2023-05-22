@@ -17,6 +17,7 @@ it to generate these Ansible Inventory files. All bugs and horrible code our min
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -28,11 +29,18 @@ import (
 )
 
 type vms struct {
-	UUID      string
-	Name      string
-	ProjectID string
-	IP        string
-	Status    string
+	UUID        string
+	Name        string
+	ProjectID   string
+	IpAddresses OsAddresses
+	Status      string
+}
+
+type OsAddresses []struct {
+	OSEXTIPSMACMacAddr string `json:"OS-EXT-IPS-MAC:mac_addr"`
+	OSEXTIPSType       string `json:"OS-EXT-IPS:type"`
+	Addr               string `json:"addr"`
+	Version            int    `json:"version"`
 }
 
 func startup() *gophercloud.ProviderClient {
@@ -133,7 +141,21 @@ func populateServers(provider *gophercloud.ProviderClient) ([]vms, error) {
 		s.Name = server.Name
 		s.ProjectID = server.TenantID
 		s.Status = server.Status
-		s.IP = server.AccessIPv4
+
+		for _, addresses := range server.Addresses {
+			jsonStr, err := json.Marshal(addresses)
+			if err != nil {
+				fmt.Println(err)
+			}
+
+			var osaddr OsAddresses
+			if err := json.Unmarshal([]byte(jsonStr), &osaddr); err != nil {
+				fmt.Println(err)
+			}
+
+			s.IpAddresses = osaddr
+		}
+
 		osServers = append(osServers, s)
 	}
 
@@ -142,6 +164,20 @@ func populateServers(provider *gophercloud.ProviderClient) ([]vms, error) {
 		fmt.Println(found)
 	*/
 	return osServers, nil
+}
+
+func extractIP(ip OsAddresses) (string, error) {
+	var addr string
+	for _, v := range ip {
+		addr = v.Addr
+	}
+
+	if addr == "" {
+		err := errors.New("unable to find any address")
+		return addr, err
+	}
+
+	return addr, nil
 }
 
 func main() {
@@ -155,8 +191,12 @@ func main() {
 	// debug output while getting everything setup before doing the yaml output
 	for _, s := range vms {
 		if s.Status == "ACTIVE" {
-			fmt.Print(s.Name + " :")
-			fmt.Println(s.IP)
+			fmt.Print(s.Name + " : ")
+			ip, err := extractIP(s.IpAddresses)
+			if err != nil {
+				panic(err)
+			}
+			fmt.Println(ip)
 		}
 	}
 
