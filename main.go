@@ -236,7 +236,7 @@ func populateVars(inventory AllHosts) (AllHosts, error) {
 }
 
 /*
-This function will create a script that will reset the ssh keys on the nodes.
+This function will create a script that will reset the ssh keys on the local node.
 This is useful if you are using a cloud-init script that sets the ssh keys
 on the nodes. This will reset the ssh keys on the nodes so that you can ssh
 into them with the new keys.
@@ -270,11 +270,13 @@ func createSSHResetScript(vms AllHosts, domain string, projectname string) {
 
 func main() {
 	osProvder := startup()
+	fmt.Println("Starting OpenStack-Ansible-Inventory")
 
 	vms, err := populateServers(osProvder)
 	if err != nil {
 		panic(err)
 	}
+	fmt.Println("Connected successfully to OpenStack")
 
 	yamlinventory := populateHosts(vms)
 	yamlinventory, err = populateVars(yamlinventory)
@@ -303,6 +305,7 @@ func main() {
 
 	if os.Getenv("SSH_RESET") == "true" {
 		fmt.Println("Also Generating SSH Reset Script")
+		// DNS_DOMAIN is optional
 		createSSHResetScript(yamlinventory, os.Getenv("DNS_DOMAIN"), projectname)
 	}
 
