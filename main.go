@@ -26,6 +26,7 @@ import (
 	"github.com/gophercloud/gophercloud"
 	"github.com/gophercloud/gophercloud/openstack"
 	"github.com/gophercloud/gophercloud/openstack/compute/v2/servers"
+	"gopkg.in/yaml.v2"
 )
 
 type vms struct {
@@ -41,6 +42,26 @@ type OsAddresses []struct {
 	OSEXTIPSType       string `json:"OS-EXT-IPS:type"`
 	Addr               string `json:"addr"`
 	Version            int    `json:"version"`
+}
+
+type AllHosts struct {
+	All Hosts `yaml:"all"`
+}
+
+type Hosts struct {
+	Hosts map[string]Ansiblehost `yaml:"hosts"`
+	Var   Ansiblevars            `yaml:"vars"`
+}
+
+type Ansiblehost struct {
+	HostIp   string `yaml:"ansible_host"`
+	Hostname string `yaml:"hostname"`
+}
+
+// AnsibleVars is the struct for the ansible vars
+type Ansiblevars struct {
+	Ansibleuser          string `yaml:"ansible_user"`
+	Ansiblesshcommonargs string `yaml:"ansible_ssh_common_args"`
 }
 
 func startup() *gophercloud.ProviderClient {
@@ -106,6 +127,8 @@ func osAuth() (*gophercloud.ProviderClient, error) {
 	return provider, err
 }
 
+// populateServers will populate the vms struct with the current running instances
+// in the OpenStack project.
 func populateServers(provider *gophercloud.ProviderClient) ([]vms, error) {
 	var osServers []vms
 
@@ -166,6 +189,7 @@ func populateServers(provider *gophercloud.ProviderClient) ([]vms, error) {
 	return osServers, nil
 }
 
+// Get an address from the nodes. If we don't get one error out.
 func extractIP(ip OsAddresses) (string, error) {
 	var addr string
 	for _, v := range ip {
@@ -180,6 +204,70 @@ func extractIP(ip OsAddresses) (string, error) {
 	return addr, nil
 }
 
+// populateHosts will populate the AllHosts struct with the current running instances
+func populateHosts(vms []vms) AllHosts {
+	var allHosts AllHosts
+
+	allHosts.All.Hosts = make(map[string]Ansiblehost)
+
+	for _, s := range vms {
+		if s.Status == "ACTIVE" {
+			ip, err := extractIP(s.IpAddresses)
+			if err != nil {
+				panic(err)
+			}
+			var ansibleHost Ansiblehost
+			ansibleHost.HostIp = ip
+			ansibleHost.Hostname = s.Name
+			allHosts.All.Hosts[s.Name] = ansibleHost
+		}
+	}
+
+	return allHosts
+}
+
+// populateVars will populate the AllHosts struct with hardcoded vars for now
+// TODO: Make this dynamic
+func populateVars(inventory AllHosts) (AllHosts, error) {
+	inventory.All.Var.Ansibleuser = "ubuntu"
+	inventory.All.Var.Ansiblesshcommonargs = "-o StrictHostKeyChecking=no"
+
+	return inventory, nil
+}
+
+/*
+This function will create a script that will reset the ssh keys on the nodes.
+This is useful if you are using a cloud-init script that sets the ssh keys
+on the nodes. This will reset the ssh keys on the nodes so that you can ssh
+into them with the new keys.
+
+Format of the script is as follows:
+
+#!/bin/bash
+ssh-keygen -f $HOME/.ssh/known_hosts -R "IP_ADDRESS"
+ssh-keygen -f $HOME/.ssh/known_hosts -R "HOSTNAME"
+
+*/
+func createSSHResetScript(vms AllHosts, domain string, projectname string) {
+	var script string
+	script = "#!/bin/bash\n"
+
+	for _, v := range vms.All.Hosts {
+		script = script + "ssh-keygen -f $HOME/.ssh/known_hosts -R " + v.HostIp + "\n"
+		if domain == "" {
+			script = script + "ssh-keygen -f $HOME/.ssh/known_hosts -R " + v.Hostname + "\n"
+		} else {
+			script = script + "ssh-keygen -f $HOME/.ssh/known_hosts -R " + v.Hostname + "." + domain + "\n"
+		}
+	}
+
+	err := os.WriteFile("reset-ssh-"+projectname+".sh", []byte(script), 0755)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("Wrote reset-ssh-" + projectname + ".sh")
+}
+
 func main() {
 	osProvder := startup()
 
@@ -188,16 +276,34 @@ func main() {
 		panic(err)
 	}
 
-	// debug output while getting everything setup before doing the yaml output
-	for _, s := range vms {
-		if s.Status == "ACTIVE" {
-			fmt.Print(s.Name + " : ")
-			ip, err := extractIP(s.IpAddresses)
-			if err != nil {
-				panic(err)
-			}
-			fmt.Println(ip)
-		}
+	yamlinventory := populateHosts(vms)
+	yamlinventory, err = populateVars(yamlinventory)
+	if err != nil {
+		panic(err)
+	}
+
+	yamlout, err := yaml.Marshal(&yamlinventory)
+	if err != nil {
+		panic(err)
+	}
+
+	// This name is already verifyed to be set in startup()
+	projectname := os.Getenv("OS_PROJECT_NAME")
+	filename := projectname + ".yaml"
+
+	err = os.WriteFile(filename, yamlout, 0644)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("Wrote %s\n", filename)
+
+	if os.Getenv("DEBUG") != "" {
+		fmt.Println(string(yamlout))
+	}
+
+	if os.Getenv("SSH_RESET") == "true" {
+		fmt.Println("Also Generating SSH Reset Script")
+		createSSHResetScript(yamlinventory, os.Getenv("DNS_DOMAIN"), projectname)
 	}
 
 }
